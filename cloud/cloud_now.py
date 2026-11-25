@@ -285,103 +285,112 @@ def calendar_block():
         return R + (got if got else ["　日历与新闻均未取到，稍后重试"])
 
 
+# ---------------- 新闻 ----------------
+LIVE_APIS = [
+    "https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global-channel&limit=20",
+    "https://api-one.wscn.awtmt.com/apiv1/content/lives?channel=global-channel&limit=20",
+    "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=20",
+]
+
+
+def fetch_news(pages=10):
+    """翻页抓快讯。接口 limit 上限 20 条，用 next_cursor 往回翻。
+    返回 [{"t": 北京时间, "txt": 正文}, ...]，从新到旧。"""
+    out, cursor, seen = [], None, set()
+    for _ in range(pages):
+        got = None
+        for base in LIVE_APIS:
+            u = base + (f"&cursor={cursor}" if cursor else "")
+            try:
+                d = json.loads(_get(u, decode="utf-8"))
+                data = d.get("data") or {}
+                items = data.get("items") or []
+                if items:
+                    got = (items, data.get("next_cursor"))
+                    break
+            except Exception:
+                continue
+        if not got:
+            break
+        items, nxt = got
+        for it in items:
+            ts = it.get("display_time") or it.get("created_at")
+            if not ts:
+                continue
+            try:
+                t = (datetime.fromtimestamp(int(ts), timezone.utc).replace(tzinfo=None)
+                     + timedelta(hours=8))
+            except Exception:
+                continue
+            txt = str(it.get("content_text") or it.get("title") or "").replace("\n", " ").strip()
+            key = txt[:26]
+            if not txt or key in seen:
+                continue
+            seen.add(key)
+            out.append({"t": t, "txt": txt})
+        if not nxt:
+            break
+        cursor = nxt
+    return out
+
+
+KW_NEWS = ("加息", "降息", "通胀", "PCE", "CPI", "PPI", "GDP", "黄金", "原油",
+           "比特币", "美元", "收益率", "美联储", "英央行", "欧洲央行", "斯托克",
+           "纳指", "标普", "道指", "VIX", "非农", "失业", "白银", "库存")
+
+
 def _econ_from_news():
-    """从见闻快讯里抽取「指标 实际 X%，预期 Y%」结构。"""
-    d = None
-    for u in LIVE_APIS:
-        try:
-            b = _get(u, decode="utf-8")
-            d = json.loads(b)
-            if (d.get("data") or {}).get("items"):
-                break
-            d = None
-        except Exception:
-            d = None
-    if not d:
+    """从快讯抽取「指标 实际 X，预期 Y」。翻页后能覆盖数小时前公布的数据。"""
+    items = fetch_news(pages=12)
+    if not items:
         return []
-    items = (d["data"] or {}).get("items") or []
-    R = []
+    now = NOW()
+    R, seen = [], set()
     pat = re.compile(r"(.{4,42}?)\s*(-?\d+(?:\.\d+)?)\s*(%|万人|万)?"
                      r"[^\d，,]{0,4}[，,]\s*预期\s*(-?\d+(?:\.\d+)?)")
-    for it in items:
-        txt = str(it.get("content_text") or "").replace("\n", " ")
-        ts = it.get("display_time") or it.get("created_at")
-        t_obj = None
-        try:
-            t_obj = (datetime.fromtimestamp(int(ts), timezone.utc).replace(tzinfo=None)
-                     + timedelta(hours=8)) if ts else None
-        except Exception:
-            t_obj = None
-        if not any(k in txt for k in KEY_EV):
+    for x in items:
+        if (now - x["t"]).total_seconds() > 12 * 3600:
             continue
-        # 只取近 6 小时
-        if t_obj and (NOW() - t_obj).total_seconds() > 6 * 3600:
+        txt = x["txt"]
+        if not any(k in txt for k in KEY_EV):
             continue
         m = pat.search(txt)
         if not m:
             continue
         try:
-            a = float(m.group(2))
-            f_ = float(m.group(4))
+            a, f_ = float(m.group(2)), float(m.group(4))
         except Exception:
             continue
+        key = (x["t"].strftime("%H:%M"), m.group(1)[-16:])
+        if key in seen:
+            continue
+        seen.add(key)
         j = "超预期" if a > f_ else ("不及预期" if a < f_ else "符合")
-        ts = it.get("display_time") or it.get("created_at")
-        try:
-            t = datetime.fromtimestamp(int(ts)).strftime("%H:%M")
-        except Exception:
-            t = "--:--"
-        R.append(f"　{t} {m.group(1)[:26]:<28}实际 {a:>8.2f}　预期 {f_:>7g}　{j}")
+        unit = m.group(3) or ""
+        name = m.group(1).strip()
+        if len(name) > 26:
+            name = name[:26]
+        R.append(f"　{x['t']:%H:%M} {name:<28}"
+                 f"实际 {a:>8.2f}{unit}　预期 {f_:>7g}　{j}")
         if len(R) >= 12:
             break
     return R
 
 
-# ---------------- 新闻 ----------------
-LIVE_APIS = [
-    "https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global-channel&limit=200",
-    "https://api-one.wscn.awtmt.com/apiv1/content/lives?channel=global-channel&limit=200",
-    "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=200",
-]
-
-
-def news_block(n=8):
-    d = None
-    for u in LIVE_APIS:
-        try:
-            b = _get(u, decode="utf-8")
-            d = json.loads(b)
-            if (d.get("data") or {}).get("items"):
-                break
-            d = None
-        except Exception:
-            d = None
-    if not d:
+def news_block(n=10):
+    """近 6 小时重点快讯。"""
+    items = fetch_news(pages=10)
+    if not items:
         return ["■ 新闻抓取失败（所有域名）"]
-    items = (d["data"] or {}).get("items") or []
-    R = [f"■ 近 6 小时快讯（共 {len(items)} 条，取重点）"]
-    shown = 0
-    for it in items:
-        txt = str(it.get("content_text") or it.get("title") or "").replace("\n", " ")
-        ts = it.get("display_time") or it.get("created_at")
-        try:
-            t = datetime.fromtimestamp(int(ts))
-        except Exception:
-            t = None
-        if t and (NOW() - t).total_seconds() > 6 * 3600:
-            continue
-        # 只要含方向的实质内容
-        if not any(k in txt for k in ("加息", "降息", "通胀", "PCE", "CPI", "PPI", "GDP",
-                                      "黄金", "原油", "比特币", "美元", "收益率",
-                                      "美联储", "英央行", "欧洲央行", "斯托克", "纳指",
-                                      "标普", "道指", "VIX", "非农", "失业")):
-            continue
-        R.append(f"　{t:%m-%d %H:%M} {txt[:96]}" if t else f"　{txt[:96]}")
-        shown += 1
-        if shown >= n:
-            break
-    if not shown:
+    now = NOW()
+    recent = [x for x in items if (now - x["t"]).total_seconds() <= 6 * 3600]
+    hits = [x for x in recent if any(k in x["txt"] for k in KW_NEWS)]
+    R = [f"■ 近 6 小时快讯（抓 {len(items)} 条，命中 {len(hits)} 条，取前 {min(n, len(hits))}）"]
+    if not hits:
         R.append("　（近 6 小时无相关快讯）")
+        return R
+    for x in hits[:n]:
+        R.append(f"　{x['t']:%m-%d %H:%M} {x['txt'][:96]}")
     return R
 
 
