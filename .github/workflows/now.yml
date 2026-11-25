@@ -38,9 +38,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-
-      - name: 安装依赖（akshare 只需一次，缓存后快）
+          - name: 安装依赖（akshare 只需一次，缓存后快）
         run: |
           python -m pip install --upgrade pip
           pip install akshare
